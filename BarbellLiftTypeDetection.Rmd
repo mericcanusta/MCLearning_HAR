@@ -1,0 +1,130 @@
+#Barbell Lift Type Prediction Using Data From Wearable Devices
+
+##Executive Summary
+The economic costs related to musculoskeletal injuries, usually triggered by a history of repeated wrong postures, are a huge burden to the society. The Institute in Medicine estimates the economic burden of such disorders as measured by compensation costs, lost wages, and lost productivity, [are between $45 and $54 billion annually.][s1]
+According to Liberty Mutual, the largest workers' compensation insurance provider in the United States, overexertion injuries-lifting, pushing, pulling, holding, carrying or throwing an object-cost employers [$13.4 billion every year.][s2] 
+Unlike athletes, recreational and occasional exercisers typically cannot easily access professional feedback and training. Wearable devices can be helpful in this regard by collecting activity data from specified parts of the body and providing an instant feedback. Thus, a natural concern is how to best organize this data in the form of an automated decision maker that can accurately judge between postures done correctly and wrong. [Machine learning algorithms, although some not clearly interpretable, provides an effective means to tackle this issue][s4].
+Another concern is economy of the devices themselves. Though available commercial devices such as Jawbone Up, Nike FuelBand, and Fitbit can collect data relatively inexpensively, restricting and controlling for the set of devices that suffice in classifying certain type of movements can add extra efficiency, comfort, and reliability to these feedback systems. Analytical tools such as statistical analysis and data visualization helps with this issue.
+In this simple study, we utilize the available [Human Activity Recognition data on dumbbell lifts][s3] of 19,622 observations, clean it, and create predicting frameworks using the default random forest ("rf") framework provided by the [caret package][s5] to predict five activity classes. The resulting frameworks are pretty accurate, with (estimated 10-fold cross validation) inaccuracy estimates of %0.44, %0.63, and %1.08 for models containing 52, 16, and 9 predictors, respectively. All three predictors, including the 9-feature model, accurately predict the entire testing set of 20 observations. This relative flatness of the complexity-accuracy tradeoff suggests that most of the data and sensing adds very little value, if any, for particular types of exercises. Therefore, sensing products for specific purposes can be built cheaply, comfortably, and reliably. In particular, general purpose sensing can greatly gain reliability and save battery life by deactivating a large extent of its features during repetitive exercising. 
+
+##Data
+This analysis uses the [Human Activity Recognition data on dumbbell lifts][s3] obtained through accelerometers on the belt, forearm, arm, and dumbell of 6 participants who were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The training set contains 19,622 observations of 160 variables, and the testing set contains 20 such observations.
+```{r}
+filename <- "pml-training.csv"
+filename2 <- "pml-testing.csv"
+if(!file.exists(filename)){
+    DownloadMethods<-c("internal","curl")
+    fileurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+    fileurl2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+    download.file(fileurl,filename,
+                  mode="wb",
+                  method=DownloadMethods[2-as.numeric(.Platform$OS.type=="windows")])
+        download.file(fileurl2,filename2,
+                  mode="wb",
+                  method=DownloadMethods[2-as.numeric(.Platform$OS.type=="windows")])
+    rm(fileurl,fileurl2,DownloadMethods)
+}
+training<-read.csv(filename)
+testing<-read.csv(filename2)
+```
+
+##Data Processing
+As the analysis takes a considerable amount of time, we use the aid of parallel computing provided by the ["doParallel" package][s8] to speed up calculations.
+```{r}
+require(doParallel)
+registerDoParallel(cores=detectCores())
+```
+We also rely on the package "caret" for building our random forest predictor.
+```{r}
+library(caret)
+```
+Among the features, roll and pitch of the belt censor alone provides 
+the base for prediction capabilities.
+```{r fig.width=10, fig.height=5}
+plot(training$roll_belt,training$pitch_belt,col=training$classe)
+```
+However, a classification based solely on these variables will be poor. Thus, we do a sequential elimination of variables through a sequence of random forest predictors and with the aid of statistical methods. 
+
+First, we eliminate variables that have no measurements in either of the window types. We remove observation ID's and subject identities. We also choose not to consider observation timestamps, as measurements record static postures.
+```{r}
+elimine<-c(1:7,12:36,50:59,69:83,87:101,103:112,125:139,141:150)
+training<-training[,-elimine]
+testing<-testing[,-elimine]
+```
+
+Out of the 52 complete features remaining, there are no near-constant (or near-zero-variability) variables. For ease of analysis, we convert all integer (angular) measurements into numerical values. The classes have already been conveniently read as factors.
+
+```{r}
+for (i in 1:52) training[,i]<-as.numeric(training[,i])
+for (i in 1:52) testing[,i]<-as.numeric(testing[,i])
+```
+
+We start with a full-scale prediction with the whole set of variables. This step takes about an hour of clock time on four 2 GhZ Intel-i5 threads.
+
+```{r mdl1, cache=TRUE}
+set.seed(12033)
+trControl <- trainControl(method = "cv", number = 10, allowParallel = T, savePred=T)
+mdl<-train(classe~.,data=training,method="rf",trControl=trControl, importance=T)
+print(mdl$finalModel)
+pred<-predict(mdl,testing)
+```
+
+The model is very powerful, yet it is not only computationally burdensome, but also is too much "data-hungry". Thus, we cluster the variables by grouping variables in 10 groups and utilizing the function "cutreevar" [of the package "ClustOfVar"][s6]. In particular, we choose the features that are closest and farthest from each group mean (as estimated by the square loadings). In case of ties, we arbitrarily pick one unless it is an angular measurement we do not prefer (as it adds sensing complexity).
+
+```{r cluster, cache=TRUE, echo=FALSE}
+require(ClustOfVar)
+htraining<-hclustvar(training[,1:52])
+ctraining<-cutreevar(htraining,10)
+ctraining$var
+```
+
+Based on the 16 variables we pick, we run another random forest model:
+
+```{r mdl2, cache=TRUE}
+simple<-c("roll_belt","pitch_belt","gyros_belt_y","gyros_belt_z","roll_arm","total_accel_arm","magnet_arm_y","magnet_arm_x","roll_dumbbell","accel_dumbbell_z","magnet_dumbbell_x","gyros_dumbbell_x","magnet_forearm_z","gyros_forearm_y","accel_forearm_y","roll_forearm")
+stesting<-testing[,c(simple,"problem_id")]
+straining<-training[,c(simple,"classe")]
+set.seed(12033)
+trControls <- trainControl(method = "cv", number = 10, allowParallel = T, savePred=T)
+mdls<-train(classe~.,data=straining,method="rf",trControl=trControls, importance=T)
+print(mdls$finalModel)
+preds<-predict(mdls,testing)
+```
+
+Elimination of three quarters of parameters lead only to a marginal increase in inaccuracy (~0.4% vs. ~0.6%) measured through the aggregate inaccuracy of the 10-fold cross-validation (which is an [unbiased estimate of the out of sample inaccuracy][s7]). Next, we further eliminate variables by highest importance among constituent trees in the random forest, and we choose a rather harsh cutoff of %50 max. relative importance vis-a-vis the most important variable.
+
+```{r mdl3, cache=TRUE}
+varImp(mdls)
+simpler<-c("roll_belt","pitch_belt","roll_arm","magnet_dumbbell_x","roll_dumbbell","accel_dumbbell_z","magnet_forearm_z","roll_forearm","gyros_forearm_y")
+sitesting<-stesting[,c(simpler,"problem_id")]
+sitraining<-straining[,c(simpler,"classe")]
+set.seed(12033)
+trControlsi <- trainControl(method = "cv", number = 10, allowParallel = T, savePred=T)
+mdlsi<-train(classe~.,data=sitraining,method="rf",trControl=trControlsi, importance=T)
+print(mdlsi$finalModel)
+predsi<-predict(mdlsi,testing)
+```
+
+This model has about 1% inaccuracy with just 9 variables. Given there are 5 classes to predict, such an effective elimination of features clearly shows the potential for obtaining correct posture predictions with a very simple set of sensors.
+
+Finally, all three predictors of the test set are identical, and each set of predictions predicts all 20 observations correctly.
+
+```{r}
+identical(pred,preds)
+identical(pred,predsi)
+```
+
+##Additional Take-Aways
+
+For the particulars of dumbbell lifting, it seems that providing roll and pitch feedback on the waist forms the baseline of prediction, and having more detailed sensing on the glove and the dumbbell (in particular magnet and gyros data, though 3D-sensing is not necessary) greatly adds to the prediction accuracy. 
+
+On the other hand, the relative flatness of the complexity-accuracy tradeoff suggests that most of the data and sensing adds very little value, if any, for particular types of exercises. Therefore, sensing products for specific purposes can be built cheaply, comfortably, and reliably. In particular, general purpose sensing can greatly gain reliability and save battery life by deactivating a large extent of its features during repetitive exercising. We further posit that extra accuracy can be gained at no cost by normalizing the measurements with the height and body measurements of the user, which was not available in the data.
+
+[s1]:http://www.cdc.gov/workplacehealthpromotion/implementation/topics/disorders.html
+[s2]:http://www.nap.edu/openbook.php?isbn=0309072840
+[s3]:http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201
+[s4]:http://en.wikipedia.org/wiki/Activity_recognition
+[s5]:http://caret.r-forge.r-project.org/
+[s6]:http://cran.r-project.org/web/packages/ClustOfVar/ClustOfVar.pdf
+[s7]:http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr
+[s8]:http://cran.r-project.org/web/packages/doParallel/doParallel.pdf
